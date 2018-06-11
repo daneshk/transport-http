@@ -23,9 +23,11 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.DefaultHttpContent;
 import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.DefaultLastHttpContent;
+import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.handler.codec.http2.Http2EventAdapter;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2Headers;
@@ -132,21 +134,46 @@ public class ClientInboundHandler extends Http2EventAdapter {
                 return;
             }
         }
-        // Create response carbon message
-        HttpCarbonResponse responseMessage = setupResponseCarbonMessage(ctx, streamId, headers, outboundMsgHolder);
+
         if (isServerPush) {
-            outboundMsgHolder.addPushResponse(streamId, responseMessage);
+            HTTPCarbonMessage responseMessage = outboundMsgHolder.getPushResponse(streamId);
+            // Create response carbon message. if response message doesn't exist.
+            if (responseMessage == null) {
+                responseMessage = setupResponseCarbonMessage(ctx, streamId, headers, outboundMsgHolder);
+                outboundMsgHolder.addPushResponse(streamId, (HttpCarbonResponse) responseMessage);
+            }
             if (endStream) {
-                responseMessage.addHttpContent(new DefaultLastHttpContent());
-                http2ClientChannel.removePromisedMessage(streamId);
+                onTrailersRead(streamId, headers, outboundMsgHolder, responseMessage);
             }
         } else {
-            if (endStream) {
-                responseMessage.addHttpContent(new DefaultLastHttpContent());
-                http2ClientChannel.removeInFlightMessage(streamId);
+            HTTPCarbonMessage responseMessage = outboundMsgHolder.getResponse();
+            // Create response carbon message. if response message doesn't exist.
+            if (responseMessage == null) {
+                responseMessage = setupResponseCarbonMessage(ctx, streamId, headers, outboundMsgHolder);
+                outboundMsgHolder.setResponse((HttpCarbonResponse) responseMessage);
             }
-            outboundMsgHolder.setResponse(responseMessage);
+            if (endStream) {
+                onTrailersRead(streamId, headers, outboundMsgHolder, responseMessage);
+            }
         }
+    }
+
+    private void onTrailersRead(int streamId, Http2Headers headers, OutboundMsgHolder outboundMsgHolder,
+                                HTTPCarbonMessage responseMessage) {
+
+        HttpVersion version = new HttpVersion(Constants.HTTP_VERSION_2_0, true);
+        LastHttpContent lastHttpContent = new DefaultLastHttpContent();
+        HttpHeaders trailers = lastHttpContent.trailingHeaders();
+
+        try {
+            HttpConversionUtil.addHttp2ToHttpHeaders(
+                    streamId, headers, trailers, version, true, false);
+        } catch (Http2Exception e) {
+            outboundMsgHolder.getResponseFuture().
+                    notifyHttpListener(new Exception("Error while setting http headers", e));
+        }
+        responseMessage.addHttpContent(lastHttpContent);
+        http2ClientChannel.removeInFlightMessage(streamId);
     }
 
     @Override
